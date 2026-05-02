@@ -1,8 +1,8 @@
 import { Feather } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
-  FlatList,
+  Alert,
   Platform,
   ScrollView,
   StyleSheet,
@@ -17,13 +17,28 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AddExpenseModal } from "@/components/AddExpenseModal";
 import { CATEGORY_COLORS, CATEGORY_LABELS } from "@/constants/categoryColors";
 import type { Category } from "@/context/ExpenseContext";
+import { useExpenses } from "@/context/ExpenseContext";
 import type { ParsedExpense } from "@/utils/smsParser";
 import { SAMPLE_SMS_MESSAGES, parseSMS } from "@/utils/smsParser";
+import {
+  checkSmsPermission,
+  isSmsReadingSupported,
+  requestSmsPermission,
+  scanSMSForExpenses,
+} from "@/utils/smsReader";
 import { useColors } from "@/hooks/useColors";
 
 export default function MessagesScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const {
+    addManyExpenses,
+    lastSmsScanDate,
+    setLastSmsScanDate,
+    hasCompletedFirstScan,
+    markFirstScanComplete,
+  } = useExpenses();
+
   const [smsText, setSmsText] = useState("");
   const [parsed, setParsed] = useState<ParsedExpense | null>(null);
   const [parseError, setParseError] = useState("");
@@ -32,6 +47,92 @@ export default function MessagesScreen() {
     merchant?: string;
     category?: Category;
   } | null>(null);
+
+  const smsSupported = isSmsReadingSupported();
+  const [hasPermission, setHasPermission] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanStatus, setScanStatus] = useState("");
+
+  useEffect(() => {
+    if (!smsSupported) return;
+    checkSmsPermission().then(setHasPermission);
+  }, [smsSupported]);
+
+  const runScan = async (mode: "initial" | "incremental") => {
+    setIsScanning(true);
+    setScanStatus(
+      mode === "initial"
+        ? "Reading your SMS history…"
+        : "Checking for new messages…"
+    );
+    try {
+      const minDate =
+        mode === "initial"
+          ? Date.now() - 365 * 24 * 60 * 60 * 1000
+          : lastSmsScanDate ?? Date.now() - 24 * 60 * 60 * 1000;
+
+      const found = await scanSMSForExpenses({
+        minDate,
+        bankSendersOnly: true,
+        maxCount: mode === "initial" ? 5000 : 500,
+      });
+
+      if (found.length === 0) {
+        setScanStatus(
+          mode === "initial"
+            ? "No bank transactions found in your inbox"
+            : "You're all caught up — no new transactions"
+        );
+        await setLastSmsScanDate(Date.now());
+        if (mode === "initial") await markFirstScanComplete();
+        return;
+      }
+
+      const items = found.map((f) => ({
+        amount: f.amount,
+        merchant: f.merchant,
+        category: f.category,
+        date: f.date,
+        rawText: f.rawText,
+        isAIParsed: true,
+      }));
+
+      const { added, skipped } = await addManyExpenses(items);
+      await setLastSmsScanDate(Date.now());
+      if (mode === "initial") await markFirstScanComplete();
+
+      setScanStatus(
+        `Added ${added} expense${added === 1 ? "" : "s"}` +
+          (skipped > 0 ? ` · ${skipped} already in list` : "")
+      );
+
+      if (Platform.OS !== "web") {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
+    } catch {
+      setScanStatus("Scan failed. Please try again.");
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const handleEnableSMS = async () => {
+    if (Platform.OS !== "web") {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    const granted = await requestSmsPermission();
+    setHasPermission(granted);
+    if (!granted) {
+      Alert.alert(
+        "Permission Required",
+        "To auto-detect bank expenses, please enable SMS access in your device Settings → Apps → Expense Tracker → Permissions."
+      );
+      return;
+    }
+    await runScan("initial");
+  };
+
+  const handleRescan = () => runScan("incremental");
 
   const handleParse = () => {
     if (!smsText.trim()) return;
@@ -65,6 +166,15 @@ export default function MessagesScreen() {
 
   const topPad = Platform.OS === "web" ? insets.top + 67 : insets.top;
 
+  const lastScanLabel = lastSmsScanDate
+    ? new Date(lastSmsScanDate).toLocaleString("en-IN", {
+        day: "numeric",
+        month: "short",
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : "never";
+
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
       <ScrollView
@@ -83,9 +193,113 @@ export default function MessagesScreen() {
             Scan Messages
           </Text>
           <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>
-            Paste any bank SMS to auto-detect expenses
+            Auto-detect bank expenses from your SMS inbox
           </Text>
         </Animated.View>
+
+        {smsSupported && (
+          <Animated.View
+            entering={Platform.OS !== "web" ? FadeInDown.delay(40).duration(400) : undefined}
+            style={[
+              styles.autoCard,
+              { backgroundColor: colors.primary + "10", borderColor: colors.primary + "30" },
+            ]}
+          >
+            <View style={styles.autoHeader}>
+              <View style={[styles.autoIconWrap, { backgroundColor: colors.primary }]}>
+                <Feather name="zap" size={18} color="#fff" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.autoTitle, { color: colors.foreground }]}>
+                  Auto-Scan Inbox
+                </Text>
+                <Text style={[styles.autoSub, { color: colors.mutedForeground }]}>
+                  {hasPermission
+                    ? hasCompletedFirstScan
+                      ? `Last scanned: ${lastScanLabel}`
+                      : "Ready to scan your SMS history"
+                    : "Allow SMS access to auto-detect transactions"}
+                </Text>
+              </View>
+            </View>
+
+            {scanStatus ? (
+              <View
+                style={[
+                  styles.statusBox,
+                  { backgroundColor: colors.background, borderColor: colors.border },
+                ]}
+              >
+                <Feather
+                  name={isScanning ? "loader" : "check-circle"}
+                  size={14}
+                  color={isScanning ? colors.primary : colors.accent}
+                />
+                <Text style={[styles.statusText, { color: colors.foreground }]}>
+                  {scanStatus}
+                </Text>
+              </View>
+            ) : null}
+
+            {!hasPermission ? (
+              <TouchableOpacity
+                style={[styles.autoBtn, { backgroundColor: colors.primary }]}
+                onPress={handleEnableSMS}
+                disabled={isScanning}
+                activeOpacity={0.85}
+              >
+                <Feather name="shield" size={16} color="#fff" />
+                <Text style={styles.autoBtnText}>Enable SMS Auto-Scan</Text>
+              </TouchableOpacity>
+            ) : !hasCompletedFirstScan ? (
+              <TouchableOpacity
+                style={[styles.autoBtn, { backgroundColor: colors.primary }]}
+                onPress={() => runScan("initial")}
+                disabled={isScanning}
+                activeOpacity={0.85}
+              >
+                <Feather name="download" size={16} color="#fff" />
+                <Text style={styles.autoBtnText}>
+                  {isScanning ? "Scanning…" : "Import All History"}
+                </Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={[styles.autoBtn, { backgroundColor: colors.primary }]}
+                onPress={handleRescan}
+                disabled={isScanning}
+                activeOpacity={0.85}
+              >
+                <Feather name="refresh-cw" size={16} color="#fff" />
+                <Text style={styles.autoBtnText}>
+                  {isScanning ? "Scanning…" : "Scan for New Messages"}
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            <Text style={[styles.privacyText, { color: colors.mutedForeground }]}>
+              Your messages are processed entirely on your device. Nothing leaves your
+              phone.
+            </Text>
+          </Animated.View>
+        )}
+
+        {!smsSupported && (
+          <Animated.View
+            entering={Platform.OS !== "web" ? FadeInDown.delay(40).duration(400) : undefined}
+            style={[
+              styles.infoCard,
+              { backgroundColor: colors.muted, borderColor: colors.border },
+            ]}
+          >
+            <Feather name="info" size={16} color={colors.mutedForeground} />
+            <Text style={[styles.infoText, { color: colors.mutedForeground }]}>
+              {Platform.OS === "ios"
+                ? "iOS doesn't allow apps to read SMS. Paste messages below to add them manually."
+                : "SMS auto-scan is only available on the Android build."}
+            </Text>
+          </Animated.View>
+        )}
 
         <Animated.View
           entering={Platform.OS !== "web" ? FadeInDown.delay(80).duration(400) : undefined}
@@ -94,7 +308,7 @@ export default function MessagesScreen() {
           <View style={styles.inputHeader}>
             <Feather name="message-square" size={16} color={colors.primary} />
             <Text style={[styles.inputLabel, { color: colors.foreground }]}>
-              Paste SMS Message
+              Paste SMS Manually
             </Text>
           </View>
           <TextInput
@@ -288,6 +502,69 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   subtitle: { fontSize: 13, fontFamily: "Inter_400Regular" },
+  autoCard: {
+    marginHorizontal: 16,
+    marginBottom: 16,
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1,
+    gap: 12,
+  },
+  autoHeader: { flexDirection: "row", alignItems: "center", gap: 12 },
+  autoIconWrap: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  autoTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    fontFamily: "Inter_700Bold",
+    marginBottom: 2,
+  },
+  autoSub: { fontSize: 12, fontFamily: "Inter_400Regular" },
+  autoBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    padding: 13,
+    borderRadius: 12,
+  },
+  autoBtnText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "700",
+    fontFamily: "Inter_700Bold",
+  },
+  statusBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  statusText: { fontSize: 12, fontFamily: "Inter_500Medium", flex: 1 },
+  privacyText: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    textAlign: "center",
+    lineHeight: 16,
+  },
+  infoCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginHorizontal: 16,
+    marginBottom: 16,
+    padding: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+  },
+  infoText: { flex: 1, fontSize: 12, fontFamily: "Inter_400Regular", lineHeight: 17 },
   card: {
     marginHorizontal: 16,
     marginBottom: 20,

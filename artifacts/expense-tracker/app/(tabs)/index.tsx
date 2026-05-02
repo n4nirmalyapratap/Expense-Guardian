@@ -1,7 +1,9 @@
 import { Feather } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
-import React, { useMemo, useState } from "react";
+import { useRouter } from "expo-router";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Alert,
   Platform,
   ScrollView,
   StyleSheet,
@@ -22,6 +24,10 @@ import {
 import type { Category } from "@/context/ExpenseContext";
 import { useExpenses } from "@/context/ExpenseContext";
 import { useColors } from "@/hooks/useColors";
+import {
+  checkSmsPermission,
+  isSmsReadingSupported,
+} from "@/utils/smsReader";
 
 function getGreeting() {
   const h = new Date().getHours();
@@ -37,9 +43,43 @@ function fmt(n: number) {
 export default function HomeScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { expenses, getTotalByCategory, getTotalThisMonth, getTotalThisWeek } =
-    useExpenses();
+  const router = useRouter();
+  const {
+    expenses,
+    getTotalByCategory,
+    getTotalThisMonth,
+    getTotalThisWeek,
+    hasCompletedFirstScan,
+    isLoading,
+  } = useExpenses();
   const [showAdd, setShowAdd] = useState(false);
+  const [showSmsBanner, setShowSmsBanner] = useState(false);
+  const promptedRef = useRef(false);
+
+  useEffect(() => {
+    if (isLoading || promptedRef.current) return;
+    if (!isSmsReadingSupported() || hasCompletedFirstScan) return;
+    promptedRef.current = true;
+
+    (async () => {
+      const granted = await checkSmsPermission();
+      setShowSmsBanner(true);
+      if (granted) return;
+      setTimeout(() => {
+        Alert.alert(
+          "Auto-Import Your Expenses",
+          "Allow Expense Tracker to read your SMS so we can automatically detect bank transactions and add them as expenses. Your messages stay 100% on your device.",
+          [
+            { text: "Maybe Later", style: "cancel" },
+            {
+              text: "Set Up Now",
+              onPress: () => router.push("/messages"),
+            },
+          ]
+        );
+      }, 600);
+    })();
+  }, [isLoading, hasCompletedFirstScan, router]);
 
   const totalMonth = getTotalThisMonth();
   const totalWeek = getTotalThisWeek();
@@ -128,6 +168,45 @@ export default function HomeScreen() {
             </View>
           </LinearGradient>
         </Animated.View>
+
+        {showSmsBanner && (
+          <Animated.View
+            entering={Platform.OS !== "web" ? FadeInDown.delay(120).duration(400) : undefined}
+            style={[
+              styles.smsBanner,
+              {
+                backgroundColor: colors.accent + "15",
+                borderColor: colors.accent + "40",
+              },
+            ]}
+          >
+            <View style={[styles.smsBannerIcon, { backgroundColor: colors.accent }]}>
+              <Feather name="zap" size={16} color="#fff" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.smsBannerTitle, { color: colors.foreground }]}>
+                Auto-Import from SMS
+              </Text>
+              <Text style={[styles.smsBannerSub, { color: colors.mutedForeground }]}>
+                Detect all your bank transactions automatically
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.smsBannerBtn, { backgroundColor: colors.accent }]}
+              onPress={() => router.push("/messages")}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.smsBannerBtnText}>Set Up</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => setShowSmsBanner(false)}
+              hitSlop={8}
+              style={styles.smsBannerClose}
+            >
+              <Feather name="x" size={14} color={colors.mutedForeground} />
+            </TouchableOpacity>
+          </Animated.View>
+        )}
 
         {topSegments.length > 0 && (
           <Animated.View
@@ -274,6 +353,47 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     padding: 18,
     borderWidth: 1,
+  },
+  smsBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginHorizontal: 16,
+    marginBottom: 16,
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+  },
+  smsBannerIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  smsBannerTitle: {
+    fontSize: 13,
+    fontWeight: "700",
+    fontFamily: "Inter_700Bold",
+    marginBottom: 1,
+  },
+  smsBannerSub: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+  },
+  smsBannerBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  smsBannerBtnText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "700",
+    fontFamily: "Inter_700Bold",
+  },
+  smsBannerClose: {
+    padding: 2,
   },
   sectionTitle: {
     fontSize: 17,

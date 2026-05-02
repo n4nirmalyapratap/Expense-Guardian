@@ -32,6 +32,9 @@ export interface Expense {
 interface ExpenseContextType {
   expenses: Expense[];
   addExpense: (expense: Omit<Expense, "id">) => Promise<void>;
+  addManyExpenses: (
+    items: Omit<Expense, "id">[]
+  ) => Promise<{ added: number; skipped: number }>;
   removeExpense: (id: string) => Promise<void>;
   updateExpense: (id: string, updates: Partial<Expense>) => Promise<void>;
   getTotalByCategory: () => Record<Category, number>;
@@ -39,14 +42,25 @@ interface ExpenseContextType {
   getTotalThisMonth: () => number;
   getTotalThisWeek: () => number;
   isLoading: boolean;
+  lastSmsScanDate: number | null;
+  setLastSmsScanDate: (date: number) => Promise<void>;
+  hasCompletedFirstScan: boolean;
+  markFirstScanComplete: () => Promise<void>;
 }
 
 const ExpenseContext = createContext<ExpenseContextType | null>(null);
 
 const STORAGE_KEY = "@expenses_v2";
+const LAST_SCAN_KEY = "@last_sms_scan_v1";
+const FIRST_SCAN_KEY = "@first_sms_scan_done_v1";
 
 function makeId(): string {
   return Date.now().toString() + Math.random().toString(36).substr(2, 9);
+}
+
+function dedupeKey(e: Pick<Expense, "amount" | "merchant" | "date" | "rawText">): string {
+  if (e.rawText) return "raw:" + e.rawText.replace(/\s+/g, " ").trim().slice(0, 200);
+  return `${e.amount}|${e.merchant}|${e.date.slice(0, 16)}`;
 }
 
 const now = Date.now();
@@ -202,11 +216,17 @@ const SAMPLE: Omit<Expense, "id">[] = [
 export function ExpenseProvider({ children }: { children: React.ReactNode }) {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [lastSmsScanDate, setLastSmsScanDateState] = useState<number | null>(null);
+  const [hasCompletedFirstScan, setHasCompletedFirstScan] = useState(false);
 
   useEffect(() => {
     (async () => {
       try {
-        const stored = await AsyncStorage.getItem(STORAGE_KEY);
+        const [stored, lastScan, firstScan] = await Promise.all([
+          AsyncStorage.getItem(STORAGE_KEY),
+          AsyncStorage.getItem(LAST_SCAN_KEY),
+          AsyncStorage.getItem(FIRST_SCAN_KEY),
+        ]);
         if (stored) {
           setExpenses(JSON.parse(stored));
         } else {
@@ -214,6 +234,8 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
           setExpenses(sample);
           await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(sample));
         }
+        if (lastScan) setLastSmsScanDateState(parseInt(lastScan, 10));
+        if (firstScan === "1") setHasCompletedFirstScan(true);
       } catch {
       } finally {
         setIsLoading(false);
@@ -230,6 +252,40 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
     const updated = [e, ...expenses];
     setExpenses(updated);
     await save(updated);
+  };
+
+  const addManyExpenses = async (
+    items: Omit<Expense, "id">[]
+  ): Promise<{ added: number; skipped: number }> => {
+    const existingKeys = new Set(expenses.map(dedupeKey));
+    const fresh: Expense[] = [];
+    let skipped = 0;
+    for (const item of items) {
+      const key = dedupeKey(item);
+      if (existingKeys.has(key)) {
+        skipped++;
+        continue;
+      }
+      existingKeys.add(key);
+      fresh.push({ ...item, id: makeId() });
+    }
+    if (fresh.length === 0) return { added: 0, skipped };
+    const updated = [...fresh, ...expenses].sort((a, b) =>
+      a.date < b.date ? 1 : -1
+    );
+    setExpenses(updated);
+    await save(updated);
+    return { added: fresh.length, skipped };
+  };
+
+  const setLastSmsScanDate = async (date: number) => {
+    setLastSmsScanDateState(date);
+    await AsyncStorage.setItem(LAST_SCAN_KEY, date.toString());
+  };
+
+  const markFirstScanComplete = async () => {
+    setHasCompletedFirstScan(true);
+    await AsyncStorage.setItem(FIRST_SCAN_KEY, "1");
   };
 
   const removeExpense = async (id: string) => {
@@ -298,6 +354,7 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
       value={{
         expenses,
         addExpense,
+        addManyExpenses,
         removeExpense,
         updateExpense,
         getTotalByCategory,
@@ -305,6 +362,10 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
         getTotalThisMonth,
         getTotalThisWeek,
         isLoading,
+        lastSmsScanDate,
+        setLastSmsScanDate,
+        hasCompletedFirstScan,
+        markFirstScanComplete,
       }}
     >
       {children}

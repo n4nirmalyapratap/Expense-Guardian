@@ -18,7 +18,11 @@
       "bundleIdentifier": "com.n4nirmalya.expensetracker"
     },
     "android": {
-      "package": "com.n4nirmalya.expensetracker"
+      "package": "com.n4nirmalya.expensetracker",
+      "permissions": [
+        "android.permission.READ_SMS",
+        "android.permission.RECEIVE_SMS"
+      ]
     },
     "web": {
       "favicon": "./assets/images/icon.png"
