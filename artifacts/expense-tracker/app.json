@@ -14,9 +14,12 @@
       "backgroundColor": "#F7F5FF"
     },
     "ios": {
-      "supportsTablet": false
+      "supportsTablet": false,
+      "bundleIdentifier": "com.n4nirmalya.expensetracker"
     },
-    "android": {},
+    "android": {
+      "package": "com.n4nirmalya.expensetracker"
+    },
     "web": {
       "favicon": "./assets/images/icon.png"
     },
